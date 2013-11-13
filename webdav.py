@@ -7,19 +7,22 @@
 #  this code can run not just Pythonista on IOS ,also run on OSX python.
 #  Support Client: Windows / OSX / other Webdav client for IOS,etc : goodreader / iWorks for ios 
 #
-# 2013/11/7 Change Log:
+# 2013/11  Change Log:
 # 1. Combind all files to one file,so can using for Pythonista easy.
-# 2. Add MKCOL(Create dir)  MOVE(rename file)  DELETE(delete file or dir)   COPY (Copy file)   
-# 3. Change some decode ,Now it's can support Chinese.
+# 2. Add MKCOL(Create dir); MOVE(rename file);  DELETE(delete file or dir);  COPY (Copy file)   
+# 3. Change some decode, Now it's can support Chinese.
 # 4. Pythonista(For IOS) not dircache module ,so change code,don't using this module.
-# 5. change DAV version from 1 to 2, so the OSX finder can write.   **self.send_header('DAV', '2') 
+# 5. change DAV version from 1 to 2, so the OSX finder can write.   
 # 6. for DAV version 2 support , add LOCK / UNLOCK fake support. (not real lock file)
-#       *** !!!! So Don't using > 1 client sametime. maybe lost files.
+#       *** !!!! So Don't using > 1 client sametime write or delete same file. maybe lost files.
 # 7. Change the do_PROPFIND module, now it's simply & right for OSX 
 # 8. Change the do_GET module, now support RANGE
 # 9. Change the do_PUB module, add Content-Length=0 support (create empty file) ,so the OSX Finder support. 
 #        *if not add empty file,the Finder copy files and then delete all this.
-# 
+#10. Add WebDav Basic Auth function,now you can set user & passwd
+#         **using wdusers.conf file (just user:passwd), if not this file ,the Auth disable.
+#11. Fix the broken pipe error message
+#
 #   WebDav RFC: http://www.ics.uci.edu/~ejw/authoring/protocol/rfc2518.html
 #                   http://restpatterns.org/HTTP_Methods
 #
@@ -33,7 +36,7 @@ from SocketServer import ThreadingMixIn
 from StringIO import StringIO
 import sys,urllib,re,urlparse
 from time import time, timezone, strftime, localtime, gmtime
-import os, shutil, uuid, md5, mimetypes
+import os, shutil, uuid, md5, mimetypes, base64
 
 class Member:
     M_MEMBER = 1           
@@ -102,7 +105,7 @@ class FileMember(Member):
                 buf = f.read(rsize)
             else:
                 buf = f.read(65536)
-            if len(buf) == 0: # eof?
+            if not buf:
                 break
             writ += len(buf)
             wfile.write(buf)
@@ -380,8 +383,34 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
                 'getcontentlength', 'iscollection', 'isstructureddocument', 'defaultdocument',
                 'displayname', 'isroot', 'resourcetype']
     basic_props = ['name', 'getcontenttype', 'getcontentlength', 'creationdate', 'iscollection']
-		
+    auth_file = False 
+    auth_enable = False
+    Auserlist = []
+
+     # User Auth 
+     # if success ,return False; 
+     # Get WebDav User/Pass file : wdusers.conf
+     # file formate:   user:pass\n user:pass\n
+    def WebAuth(self):
+        if self.server.auth_enable:
+            if 'Authorization' in self.headers:
+                try:
+                    AuthInfo = self.headers['Authorization'][6:]
+                except:
+                    AuthInfo = ''
+                if AuthInfo in self.server.userpwd:
+                    return False    # Auth success
+            self.send_response(401,'Authorization Required')
+            self.send_header('WWW-Authenticate', 'Basic realm="WebDav Auth"')
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            return True 
+        else:
+            return False 
+
     def do_OPTIONS(self):
+        if self.WebAuth():
+            return 
         self.send_response(200, DAVRequestHandler.server_version)
         self.send_header('Allow', 'GET, HEAD, POST, PUT, DELETE, OPTIONS, PROPFIND, PROPPATCH, MKCOL, LOCK, UNLOCK, MOVE, COPY')
         self.send_header('Content-length', '0')
@@ -391,6 +420,8 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_DELETE(self):
+        if self.WebAuth():
+            return         
         path = urllib.unquote(self.path)
         if path == '':
             self.send_error(404, 'Object not found')
@@ -412,6 +443,8 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         
     def do_MKCOL(self):
+        if self.WebAuth():
+            return 
         path = urllib.unquote(self.path)
         if path != '':
             path = self.server.root.rootdir() + path
@@ -426,6 +459,8 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()        
 
     def do_MOVE(self):
+        if self.WebAuth():
+            return 
         oldfile = self.server.root.rootdir() + urllib.unquote(self.path)
         newfile = self.server.root.rootdir() + urlparse.urlparse(urllib.unquote(self.headers['Destination'])).path         
         if (os.path.isfile(oldfile)==True and os.path.isfile(newfile)==False): 
@@ -438,6 +473,8 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
 
 
     def do_COPY(self):
+        if self.WebAuth():
+            return 
         oldfile = self.server.root.rootdir() + urllib.unquote(self.path)
         newfile = self.server.root.rootdir() + urlparse.urlparse(urllib.unquote(self.headers['Destination'])).path 
         if (os.path.isfile(oldfile)==True):        #  and os.path.isfile(newfile)==False):  copy can rewrite.
@@ -471,6 +508,8 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_PROPFIND(self):
+        if self.WebAuth():
+            return 
         depth = 'infinity'
         if 'Depth' in self.headers:
             depth = self.headers['Depth'].lower()
@@ -513,8 +552,7 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
         w.write('<D:multistatus xmlns:D="DAV:" xmlns:Z="urn:schemas-microsoft-com:">\n')
 
         def write_props_member(w, m):
-            rhref = self.headers['Host']+urllib.quote(m.virname)    #add urllib.quote for chinese
-            w.write('<D:response>\n<D:href>http://%s</D:href>\n<D:propstat>\n<D:prop>\n' % rhref)
+            w.write('<D:response>\n<D:href>%s</D:href>\n<D:propstat>\n<D:prop>\n' % urllib.quote(m.virname))     #add urllib.quote for chinese
             props = m.getProperties()       # get the file or dir props 
             # For OSX Finder : getlastmodified,getcontentlength,resourceType
             if ('quota-available-bytes' in wished_props) or ('quota-used-bytes'in wished_props) or ('quota' in wished_props) or ('quotaused'in wished_props):
@@ -540,6 +578,8 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
         w.flush()
 
     def do_GET(self, onlyhead=False):
+        if self.WebAuth():
+            return 
         path, elem = self.path_elem()
         if not elem:
             self.send_error(404, 'Object not found')
@@ -593,6 +633,8 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
         self.do_GET(True)           # HEAD should behave like GET, only without contents
 
     def do_PUT(self):
+        if self.WebAuth():
+            return 
         try:
             if 'Content-length' in self.headers:
                 size = int(self.headers['Content-length'])
@@ -681,9 +723,21 @@ class BufWriter:
         return len(self.buf.getvalue().encode('utf-8'))
        
 class DAVServer(ThreadingMixIn, HTTPServer):
-    def __init__(self, addr, handler, root):
+    def __init__(self, addr, handler, root, userpwd):
         HTTPServer.__init__(self, addr, handler)
         self.root = root
+        self.userpwd = userpwd      # WebDav Auth user:passwd 
+        if len(userpwd)>0:
+            self.auth_enable = True
+        else:
+            self.auth_enable = False
+
+    # disable the broken pipe error message 
+    def finish_request(self,request,client_address):
+        try:
+            HTTPServer.finish_request(self, request, client_address)
+        except socket.error, e:
+            pass
 
 if __name__ == '__main__':
     # WebDav TCP Port 
@@ -694,7 +748,21 @@ if __name__ == '__main__':
     myaddr = socket.gethostbyname(myname)
     print 'WebDav Server run at '+myaddr+':'+str(srvport)+'...'
     server_address = ('', srvport)
+    # WebDav Auth User/Password file 
+    # if not this file ,the auth function disable.
+    # file format: user:passwd\n user:passwd\n
+    # or you can change your auth mode and file save format 
+    userpwd = []
+    try:
+        f = file('wdusers.conf', 'r')
+        for uinfo in f.readlines():
+            uinfo = uinfo.replace('\n','')
+            if len(uinfo)>2:
+                userpwd.append(base64.b64encode(uinfo))
+    except:
+        pass
     # first is Server root dir, Second is virtual dir
+    # **** Change first ./ to your dir , etc :/mnt/flash/public 
     root = DirCollection('./', '/')
-    httpd = DAVServer(server_address, DAVRequestHandler, root)
+    httpd = DAVServer(server_address, DAVRequestHandler, root, userpwd)
     httpd.serve_forever()       # todo: add some control over starting and stopping the server
