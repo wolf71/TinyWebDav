@@ -7,6 +7,9 @@
 #  this code can run not just Pythonista on IOS ,also run on OSX python.
 #  Support Client: Windows / OSX / other Webdav client for IOS,etc : goodreader / iWorks for ios 
 #
+# 20170907 Change Log:
+#  1. Fix Coda WebDav access problem.(because Coda WebDav all xml item add xmlns="DAV:".)
+# 
 # 2013/11  Change Log:
 # 1. Combind all files to one file,so can using for Pythonista easy.
 # 2. Add MKCOL(Create dir); MOVE(rename file);  DELETE(delete file or dir);  COPY (Copy file)   
@@ -37,6 +40,15 @@ from StringIO import StringIO
 import sys,urllib,re,urlparse
 from time import time, timezone, strftime, localtime, gmtime
 import os, shutil, uuid, md5, mimetypes, base64
+
+# 获取本机IP地址
+def get_localip():
+    try:
+       gAdd = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+       gAdd.connect(('www.bing.com', 80))
+       return gAdd.getsockname()[0]
+    except:
+       return '127.0.0.1'
 
 class Member:
     M_MEMBER = 1           
@@ -316,7 +328,9 @@ class XMLDict_Parser:
         self.p = p2+1
         self.tagend = p2+1
         ps = tag.find(' ')
-        if ps > 0:
+        ### Change By LCJ @ 2017/9/7 from  [ if ps > 0: ]  ###
+        ### for IOS Coda Webdav support ###
+        if ps > 0 and tag[-1] != '/':
             tag, attrs = tag.split(' ', 1)
         else:
             attrs = ''
@@ -528,7 +542,9 @@ class DAVRequestHandler(BaseHTTPRequestHandler):
             else:
                 wished_props = []
                 for prop in d['propfind']['prop']:
-                    wished_props.append(prop)
+                ### 2017/9/7 Edit By LCJ , Old is [ wished_props.append(prop)  ]
+                ### for IOS Coda Webdav support ###
+                     wished_props.append(prop.split(' ')[0])
         path, elem = self.path_elem()
         if not elem:
             if len(path) >= 1: # it's a non-existing file
@@ -744,8 +760,7 @@ if __name__ == '__main__':
     srvport = 8000
     # Get local IP address
     import socket
-    myname = socket.getfqdn(socket.gethostname())
-    myaddr = socket.gethostbyname(myname)
+    myaddr = get_localip()
     print 'WebDav Server run at '+myaddr+':'+str(srvport)+'...'
     server_address = ('', srvport)
     # WebDav Auth User/Password file 
@@ -763,6 +778,6 @@ if __name__ == '__main__':
         pass
     # first is Server root dir, Second is virtual dir
     # **** Change first ./ to your dir , etc :/mnt/flash/public 
-    root = DirCollection('./', '/')
+    root = DirCollection('./../', '/')
     httpd = DAVServer(server_address, DAVRequestHandler, root, userpwd)
     httpd.serve_forever()       # todo: add some control over starting and stopping the server
